@@ -1,18 +1,14 @@
-# Render Blueprint — provisions the whole app in one go:
-#   - Postgres database
+# Render Blueprint — provisions the app in one go:
 #   - Node backend (Express + Socket.IO / WebSockets, single instance)
 #   - Static React frontend (CRA build)
 # Docs: https://render.com/docs/blueprint-spec
 #
+# Postgres lives on Neon (free Render databases expire after 30 days) —
+# set DATABASE_URL on collab-docs-api in the dashboard to the Neon URL.
+#
 # After the first deploy, set the two cross-referencing URL vars and redeploy:
 #   collab-docs-api  -> FRONT_END_URL   = https://<frontend>.onrender.com
 #   collab-docs-web  -> REACT_APP_API_URL = https://<api>.onrender.com/   (trailing slash!)
-
-databases:
-  - name: collab-docs-db
-    plan: free
-    databaseName: collab_docs
-    user: collab_docs
 
 services:
   # --- Backend API (WebSocket server; keep to a single instance: Yjs docs are
@@ -31,10 +27,10 @@ services:
         value: production
       - key: HOST
         value: 0.0.0.0
+      # Postgres moved to Neon (free Render databases expire after 30 days).
+      # Set this in the Render dashboard to the Neon connection string.
       - key: DATABASE_URL
-        fromDatabase:
-          name: collab-docs-db
-          property: connectionString
+        sync: false
       - key: ACCESS_TOKEN_SECRET
         generateValue: true
       - key: ACCESS_TOKEN_EXPIRATION
