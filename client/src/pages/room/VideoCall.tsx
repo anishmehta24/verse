@@ -193,9 +193,14 @@ const VideoCall = ({ socket, me, mode, onModeChange }: VideoCallProps) => {
           stream.getTracks().forEach((t) => t.stop());
           return;
         }
-        // Tracks stay acquired (so toggling on is instant and peers get them)
-        // but start disabled — muted mic, no video frames.
-        stream.getTracks().forEach((t) => (t.enabled = false));
+        // Join muted with the camera truly OFF: the mic track stays acquired
+        // (disabled) so unmuting is instant, but the video track is STOPPED and
+        // removed so the camera hardware/indicator is released until turned on.
+        stream.getAudioTracks().forEach((t) => (t.enabled = false));
+        stream.getVideoTracks().forEach((t) => {
+          t.stop();
+          stream.removeTrack(t);
+        });
         localStreamRef.current = stream;
         setLocalStream(stream);
 
@@ -292,13 +297,43 @@ const VideoCall = ({ socket, me, mode, onModeChange }: VideoCallProps) => {
       socket.emit('room:media', mediaStateRef.current);
     }
   };
-  const toggleCam = () => {
-    const track = localStream?.getVideoTracks()[0];
-    if (track) {
-      track.enabled = !track.enabled;
-      setCamOn(track.enabled);
-      mediaStateRef.current = { ...mediaStateRef.current, camOn: track.enabled };
+  // Turning the camera off STOPS the video track so the hardware is released
+  // (indicator light off); turning it on re-acquires and re-shares with peers.
+  const toggleCam = async () => {
+    const stream = localStreamRef.current;
+    if (!stream) return;
+
+    if (camOn) {
+      stream.getVideoTracks().forEach((track) => {
+        Object.values(peersRef.current).forEach((peer) => {
+          try {
+            peer.removeTrack(track, stream);
+          } catch {
+            /* peer may not have negotiated this track yet */
+          }
+        });
+        track.stop();
+        stream.removeTrack(track);
+      });
+      setLocalStream(new MediaStream(stream.getTracks()));
+      setCamOn(false);
+      mediaStateRef.current = { ...mediaStateRef.current, camOn: false };
       socket.emit('room:media', mediaStateRef.current);
+    } else {
+      try {
+        const cam = await navigator.mediaDevices.getUserMedia({ video: true });
+        const newTrack = cam.getVideoTracks()[0];
+        stream.addTrack(newTrack);
+        Object.values(peersRef.current).forEach((peer) => {
+          peer.addTrack(newTrack, stream);
+        });
+        setLocalStream(new MediaStream(stream.getTracks()));
+        setCamOn(true);
+        mediaStateRef.current = { ...mediaStateRef.current, camOn: true };
+        socket.emit('room:media', mediaStateRef.current);
+      } catch {
+        setCamOn(false);
+      }
     }
   };
 

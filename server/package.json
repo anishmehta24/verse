@@ -4,10 +4,10 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "serve": "NODE_ENV=development nodemon src/server.ts",
+    "serve": "cross-env NODE_ENV=development nodemon --watch src --ext ts,json --exec \"node -r ts-node/register\" src/server.ts",
     "build": "tsc",
-    "start": "NODE_ENV=development node dist/src/server.js",
-    "test": "NODE_ENV=test jest --detectOpenHandles",
+    "start": "cross-env NODE_ENV=development node dist/src/server.js",
+    "test": "cross-env NODE_ENV=test jest --detectOpenHandles",
     "pretty": "npx prettier --write ."
   },
   "author": "",
@@ -25,6 +25,7 @@
     "@types/supertest": "^2.0.11",
     "@types/validator": "^13.7.2",
     "babel-jest": "^27.5.1",
+    "cross-env": "^10.1.0",
     "jest": "^27.5.1",
     "nodemon": "^2.0.15",
     "prettier": "^2.5.1",

@@ -1,0 +1,67 @@
+# Full local stack: Postgres + Node/Socket.IO API + nginx-served React build.
+# Bring it all up with:  docker compose up --build
+#
+# Notes:
+#   - server runs a SINGLE instance on purpose (Yjs collab docs are in-memory).
+#   - REACT_APP_API_URL is baked into the client image at BUILD time; change it
+#     here and rebuild (docker compose build client) if the API URL changes.
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: collab_docs
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d collab_docs']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  server:
+    build:
+      context: ./server
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3001
+      FRONT_END_URL: http://localhost:3000
+      # Uses the DATABASE_URL branch of db.config, but DB_SSL=false disables SSL
+      # so it can talk to the plaintext local Postgres container.
+      DATABASE_URL: postgres://postgres:postgres@db:5432/collab_docs
+      DB_SSL: 'false'
+      ACCESS_TOKEN_SECRET: dev-access-secret
+      ACCESS_TOKEN_EXPIRATION: 15m
+      REFRESH_TOKEN_SECRET: dev-refresh-secret
+      REFRESH_TOKEN_EXPIRATION: 7d
+      VERIFY_EMAIL_SECRET: dev-verify-secret
+      PASSWORD_RESET_SECRET: dev-reset-secret
+      PASSWORD_RESET_EXPIRATION: 1h
+      # No SMTP locally -> verify users immediately on signup.
+      SMTP_HOST: unused
+      SMTP_USER: unused
+      SMTP_PASSWORD: unused
+      AUTO_VERIFY_USERS: 'true'
+    ports:
+      - '3001:3001'
+    depends_on:
+      db:
+        condition: service_healthy
+
+  client:
+    build:
+      context: ./client
+      args:
+        # Browser hits the server via the host-published port, not the compose
+        # network — so this must be localhost, not the "server" service name.
+        REACT_APP_API_URL: http://localhost:3001/
+    ports:
+      - '3000:80'
+    depends_on:
+      - server
+
+volumes:
+  pgdata:

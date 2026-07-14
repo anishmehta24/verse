@@ -40,7 +40,47 @@ Verse lets teams create together in the same moment: write documents with live c
 
 ## Getting started (local)
 
-### Prerequisites
+Two ways to run Verse locally:
+- **[Option A — Docker Compose](#option-a--docker-compose-whole-stack)** — one command brings up the database, API, and frontend. Easiest.
+- **[Option B — Run services manually](#option-b--run-services-manually)** — Node dev servers with hot reload, best for active development.
+
+---
+
+### Option A — Docker Compose (whole stack)
+
+Requires only **Docker Desktop** (running). From the repo root:
+
+```bash
+docker compose up --build
+```
+
+That builds and starts three containers:
+
+| Service | Container | URL / Port |
+|---------|-----------|------------|
+| **client** | nginx-served React build | http://localhost:3000 |
+| **server** | Node + Socket.IO API | http://localhost:3001 |
+| **db** | PostgreSQL 16 | localhost:5432 |
+
+Open **http://localhost:3000**, register, and start a live session. Tables are created on first boot and data persists in the `pgdata` volume.
+
+```bash
+docker compose up -d --build   # rebuild + run in the background
+docker compose logs -f server  # follow API logs
+docker compose down            # stop (keeps data in the pgdata volume)
+docker compose down -v         # stop and DELETE the database volume
+```
+
+Notes:
+- **Port 5432 conflict:** stop any other local Postgres first, or change the published port in `docker-compose.yml`.
+- **Changing the API URL:** the client bakes `REACT_APP_API_URL` in at *build* time (`client/Dockerfile`), so rebuild the client image after changing it (`docker compose build client`).
+- The compose file ships with dev-only secrets — replace them for any non-local use.
+
+---
+
+### Option B — Run services manually
+
+#### Prerequisites
 - Node.js 18+
 - Docker (for Postgres + a local mail catcher)
 
@@ -131,4 +171,23 @@ Open **http://localhost:3000**, register, and start writing — or hit **Start a
 
 ## Deployment
 
+### Render (blueprint)
+
 The repo includes a `render.yaml` blueprint (Postgres + Node API + static frontend). The frontend needs `REACT_APP_API_URL` set to the API URL (with a trailing slash); the API needs `FRONT_END_URL` set to the frontend origin (for CORS). WebRTC video requires HTTPS, which hosts like Render provide.
+
+### Docker
+
+The project is fully containerized (`server/Dockerfile`, `client/Dockerfile` + `client/nginx.conf`, and `docker-compose.yml`). Run the whole stack with `docker compose up --build` (see [Option A](#option-a--docker-compose-whole-stack)), or build/push images individually:
+
+```bash
+docker build -t <registry>/verse-server:latest ./server
+docker build -t <registry>/verse-client:latest \
+  --build-arg REACT_APP_API_URL=https://api.example.com/ ./client
+```
+
+Production notes:
+- **Database SSL** — `server/src/config/db.config.ts` requires SSL by default (managed Postgres). Against a plaintext database (local compose container) set `DB_SSL=false`; leave it unset in production.
+- **Single instance** — real-time doc/room state is in memory, so run **one** server replica.
+- **Env vars** — the server validates all required keys on boot (`server/src/config/env.config.ts`); provide them via your platform, not a committed `.env`.
+- **HTTPS** — WebRTC video needs HTTPS in production; terminate TLS at your reverse proxy.
+- **Client API URL** — CRA inlines `REACT_APP_API_URL` at build time, so the frontend image is environment-specific; rebuild per target URL.

@@ -11,12 +11,12 @@ const sequelize =
       })
     : new Sequelize(env.DATABASE_URL, {
         dialect: 'postgres',
-        dialectOptions: {
-          ssl: {
-            require: true,
-            rejectUnauthorized: false,
-          },
-        },
+        // SSL is required by managed hosts (Render/Neon), but a local Postgres
+        // container speaks plaintext — set DB_SSL=false to disable it there.
+        dialectOptions:
+          process.env.DB_SSL === 'false'
+            ? {}
+            : { ssl: { require: true, rejectUnauthorized: false } },
         logging: false,
       });
 
