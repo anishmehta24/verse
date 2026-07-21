@@ -8,7 +8,7 @@ const userNotFound: Array<ResponseMessage> = [
 ];
 const resetPassword: Array<ResponseMessage> = [
   {
-    msg: 'If a user with that email exists, you will recieve a email with instructions to reset your password.',
+    msg: 'If a user with that email exists, you will receive an email with instructions to reset your password.',
   },
 ];
 
