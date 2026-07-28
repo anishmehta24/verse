@@ -24,6 +24,7 @@ interface RoomTimer {
 interface RoomState {
   docs: Map<string, Y.Doc>;
   timer: RoomTimer;
+  hands: Set<string>; // socket ids with a raised hand
 }
 
 const rooms = new Map<string, RoomState>();
@@ -34,6 +35,7 @@ const getRoom = (roomId: string): RoomState => {
     room = {
       docs: new Map(),
       timer: { startedAt: Date.now(), accumulated: 0, running: true },
+      hands: new Set(),
     };
     rooms.set(roomId, room);
   }
@@ -92,6 +94,17 @@ export const registerRoomNamespace = (io: Server): void => {
 
     // Tell the newcomer who is already here (so it can initiate WebRTC to them).
     socket.emit('room:peers', listPeers());
+
+    // Bring the newcomer up to speed on any hands already raised.
+    socket.emit(
+      'room:hands',
+      Array.from(getRoom(roomId).hands)
+        .filter((id) => id !== socket.id)
+        .map((id) => ({
+          id,
+          name: (nsp.sockets.get(id) as any)?.displayName || 'Guest',
+        }))
+    );
 
     // Clients (e.g. the video component, which mounts after acquiring camera)
     // can re-request the peer list once they are ready.
@@ -160,12 +173,35 @@ export const registerRoomNamespace = (io: Server): void => {
       socket.to(roomId).emit('code:result', payload);
     });
 
+    // --- Teaching mode: relay the presenter's viewport so followers track it ---
+    socket.on('room:follow', (payload: unknown) => {
+      socket.to(roomId).emit('room:follow', payload);
+    });
+
+    // --- Raise hand (ephemeral, tracked so late joiners see current hands) ---
+    socket.on('room:hand', ({ raised }: { raised: boolean }) => {
+      const r = getRoom(roomId);
+      if (raised) r.hands.add(socket.id);
+      else r.hands.delete(socket.id);
+      socket
+        .to(roomId)
+        .emit('room:hand', { id: socket.id, name: displayName, raised });
+    });
+
+    // --- Emoji reactions (fire-and-forget; sender renders its own locally) ---
+    socket.on('room:reaction', ({ emoji }: { emoji: string }) => {
+      socket
+        .to(roomId)
+        .emit('room:reaction', { id: socket.id, name: displayName, emoji });
+    });
+
     // --- WebRTC signaling passthrough (peer-to-peer video/audio) ---
     socket.on('rtc:signal', ({ to, signal }: { to: string; signal: unknown }) => {
       nsp.to(to).emit('rtc:signal', { from: socket.id, signal });
     });
 
     socket.on('disconnect', () => {
+      getRoom(roomId).hands.delete(socket.id);
       socket.to(roomId).emit('room:peer-left', { id: socket.id });
       const clients = nsp.adapter.rooms.get(roomId);
       if (!clients || clients.size === 0) rooms.delete(roomId);

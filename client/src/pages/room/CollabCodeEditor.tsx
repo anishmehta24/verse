@@ -13,7 +13,12 @@ import { html } from '@codemirror/lang-html';
 import { css } from '@codemirror/lang-css';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { yCollab } from 'y-codemirror.next';
-import { PlayIcon, TerminalIcon, DownloadIcon } from '@heroicons/react/outline';
+import {
+  PlayIcon,
+  TerminalIcon,
+  DownloadIcon,
+  AcademicCapIcon,
+} from '@heroicons/react/outline';
 import { bindYDocToRoom, colorForName } from './room-yjs';
 import useAuth from '../../hooks/use-auth';
 import CodeService from '../../services/code-service';
@@ -165,6 +170,23 @@ const CollabCodeEditor = ({ socket, me, theme }: CollabCodeEditorProps) => {
   const langRef = useRef('JavaScript');
   const [language, setLanguage] = useState('JavaScript');
 
+  // --- Teaching mode (follow-the-host) ---
+  // Spotlight state is shared room-wide via the meta map; the presenter's
+  // moment-to-moment viewport rides a lightweight `room:follow` socket event.
+  const [spotlight, setSpotlight] = useState<{
+    hostId: string;
+    hostName: string;
+  } | null>(null);
+  const [followOptOut, setFollowOptOut] = useState(false);
+  const presentingRef = useRef(false);
+  const followingRef = useRef(false);
+  const scheduleEmitRef = useRef<(() => void) | null>(null);
+
+  const mySocketId = socket.id;
+  const presenting = !!spotlight && spotlight.hostId === mySocketId;
+  const following =
+    !!spotlight && spotlight.hostId !== mySocketId && !followOptOut;
+
   // --- Code execution + shared test cases ---
   const ytestsRef = useRef<Y.Array<TestCase> | null>(null);
   const ymetaRef = useRef<Y.Map<any> | null>(null);
@@ -284,6 +306,13 @@ const CollabCodeEditor = ({ socket, me, theme }: CollabCodeEditorProps) => {
         setPanelOpen(true);
         setTab('problem');
       }
+      // Teaching mode: who (if anyone) is presenting to the room.
+      const sp = ymeta.get('spotlight') as
+        | { active: boolean; hostId: string; hostName: string }
+        | undefined;
+      setSpotlight(
+        sp && sp.active ? { hostId: sp.hostId, hostName: sp.hostName } : null
+      );
     };
     ymeta.observe(onMetaChange);
 
@@ -322,6 +351,64 @@ const CollabCodeEditor = ({ socket, me, theme }: CollabCodeEditorProps) => {
     };
     socket.on('room:sync', onCodeSync);
 
+    // --- Teaching mode wiring ---
+    // Presenter broadcasts the char offset at the top of their viewport (plus
+    // caret); followers scroll that same position to the top. Position-based
+    // (not pixel-based) so it survives each client's own pane width / wrapping.
+    const emitFollow = () => {
+      const v = viewRef.current;
+      if (!v || !presentingRef.current) return;
+      let topPos = 0;
+      try {
+        topPos = v.lineBlockAtHeight(v.scrollDOM.scrollTop).from;
+      } catch {
+        topPos = v.state.selection.main.head;
+      }
+      socket.emit('room:follow', { topPos, head: v.state.selection.main.head });
+    };
+
+    let emitTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastEmit = 0;
+    const scheduleEmit = () => {
+      if (!presentingRef.current) return;
+      const wait = 80 - (Date.now() - lastEmit);
+      if (wait <= 0) {
+        lastEmit = Date.now();
+        emitFollow();
+      } else {
+        if (emitTimer) clearTimeout(emitTimer);
+        emitTimer = setTimeout(() => {
+          lastEmit = Date.now();
+          emitFollow();
+        }, wait);
+      }
+    };
+    scheduleEmitRef.current = scheduleEmit;
+
+    const onFollow = (payload: { topPos?: number; head?: number }) => {
+      if (!followingRef.current) return;
+      const v = viewRef.current;
+      if (!v) return;
+      const pos = Math.min(Math.max(0, payload?.topPos ?? 0), v.state.doc.length);
+      try {
+        v.dispatch({
+          effects: EditorView.scrollIntoView(pos, { y: 'start', yMargin: 30 }),
+        });
+      } catch {
+        /* docs momentarily out of sync — ignore this frame */
+      }
+    };
+    socket.on('room:follow', onFollow);
+
+    // If the presenter disconnects, clear the (now stale) spotlight.
+    const onPeerLeftClearSpotlight = ({ id }: { id: string }) => {
+      const sp = ymetaRef.current?.get('spotlight') as
+        | { active: boolean; hostId: string }
+        | undefined;
+      if (sp?.active && sp.hostId === id) ymetaRef.current?.delete('spotlight');
+    };
+    socket.on('room:peer-left', onPeerLeftClearSpotlight);
+
     const state = EditorState.create({
       doc: ytext.toString(),
       extensions: [
@@ -331,15 +418,38 @@ const CollabCodeEditor = ({ socket, me, theme }: CollabCodeEditorProps) => {
         baseTheme,
         themeCompartmentRef.current.of(themeExtension(theme)),
         yCollab(ytext, awareness),
+        EditorView.updateListener.of((update) => {
+          if (!presentingRef.current) return;
+          if (
+            update.selectionSet ||
+            update.docChanged ||
+            update.viewportChanged
+          ) {
+            scheduleEmit();
+          }
+        }),
       ],
     });
 
     const view = new EditorView({ state, parent: parentRef.current });
     viewRef.current = view;
 
+    // Scrolling doesn't always change the CM viewport range, so track it too.
+    const onScroll = () => scheduleEmit();
+    view.scrollDOM.addEventListener('scroll', onScroll);
+
     return () => {
       socket.off('room:sync', onCodeSync);
       socket.off('code:result', onCodeResult);
+      socket.off('room:follow', onFollow);
+      socket.off('room:peer-left', onPeerLeftClearSpotlight);
+      view.scrollDOM.removeEventListener('scroll', onScroll);
+      if (emitTimer) clearTimeout(emitTimer);
+      scheduleEmitRef.current = null;
+      // Don't leave a dangling spotlight pointing at us after we leave.
+      if ((ymeta.get('spotlight') as any)?.hostId === socket.id) {
+        ymeta.delete('spotlight');
+      }
       ytests.unobserve(onTestsChange);
       ymeta.unobserve(onMetaChange);
       ymetaRef.current = null;
@@ -361,6 +471,29 @@ const CollabCodeEditor = ({ socket, me, theme }: CollabCodeEditorProps) => {
       effects: themeCompartmentRef.current.reconfigure(themeExtension(theme)),
     });
   }, [theme]);
+
+  // Keep the listeners' role flags current without re-running the main effect.
+  useEffect(() => {
+    presentingRef.current = presenting;
+    followingRef.current = following;
+  }, [presenting, following]);
+
+  // A new presenter takes over → start following them afresh.
+  useEffect(() => {
+    setFollowOptOut(false);
+  }, [spotlight?.hostId]);
+
+  const startTeaching = () => {
+    ymetaRef.current?.set('spotlight', {
+      active: true,
+      hostId: socket.id,
+      hostName: me,
+    });
+    setFollowOptOut(false);
+    // Push an initial viewport once the role flag has settled.
+    setTimeout(() => scheduleEmitRef.current?.(), 60);
+  };
+  const stopTeaching = () => ymetaRef.current?.delete('spotlight');
 
   const handleLanguageChange = (value: string) => {
     setLanguage(value);
@@ -567,6 +700,36 @@ const CollabCodeEditor = ({ socket, me, theme }: CollabCodeEditorProps) => {
       ref={rootRef}
       className={`flex flex-col h-full ${dark ? 'bg-[#131316]' : 'bg-white'}`}
     >
+      {spotlight && !presenting && (
+        <div className="flex items-center justify-between gap-2 px-4 py-1.5 text-xs bg-accent/10 border-b border-accent/30 text-accent flex-shrink-0">
+          <span className="flex items-center gap-1.5 min-w-0">
+            <AcademicCapIcon className="w-4 h-4 flex-shrink-0" />
+            <span className="truncate">
+              <strong>{spotlight.hostName}</strong>
+              {following
+                ? ' is presenting — following their view'
+                : ' is presenting — following paused'}
+            </span>
+          </span>
+          <button
+            onClick={() => setFollowOptOut((v) => !v)}
+            className="flex-shrink-0 font-semibold hover:underline"
+          >
+            {following ? 'Stop following' : 'Follow'}
+          </button>
+        </div>
+      )}
+      {presenting && (
+        <div className="flex items-center justify-between gap-2 px-4 py-1.5 text-xs bg-accent text-white flex-shrink-0">
+          <span className="flex items-center gap-1.5">
+            <AcademicCapIcon className="w-4 h-4" />
+            You're presenting — everyone follows your view
+          </span>
+          <button onClick={stopTeaching} className="font-semibold hover:underline">
+            Stop teaching
+          </button>
+        </div>
+      )}
       <div
         className={`flex items-center justify-between px-4 py-2 border-b flex-shrink-0 ${
           dark ? 'bg-[#0f0f0f] border-white/10' : 'bg-paper border-paper-2'
@@ -673,6 +836,24 @@ const CollabCodeEditor = ({ socket, me, theme }: CollabCodeEditorProps) => {
               </option>
             ))}
           </select>
+          <button
+            onClick={presenting ? stopTeaching : startTeaching}
+            title={
+              presenting
+                ? 'Stop presenting'
+                : 'Teach — everyone in the room follows your view'
+            }
+            className={`flex items-center gap-1 text-xs font-medium border rounded-md px-2 py-1 transition-colors ${
+              presenting
+                ? 'bg-accent text-white border-accent hover:bg-accent-hover'
+                : dark
+                ? 'bg-[#1c1c1f] text-white/70 border-white/10 hover:bg-white/10'
+                : 'bg-white text-ink-soft border-paper-2 hover:bg-paper-2'
+            }`}
+          >
+            <AcademicCapIcon className="w-3.5 h-3.5" />
+            {presenting ? 'Teaching' : 'Teach'}
+          </button>
           <button
             onClick={() => setPanelOpen((v) => !v)}
             title={panelOpen ? 'Hide console' : 'Show console'}

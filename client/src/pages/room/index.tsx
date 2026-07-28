@@ -12,6 +12,8 @@ import {
   PauseIcon,
   PlayIcon,
   RefreshIcon,
+  HandIcon,
+  EmojiHappyIcon,
 } from '@heroicons/react/outline';
 import { BASE_URL } from '../../services/api';
 import useAuth from '../../hooks/use-auth';
@@ -35,21 +37,32 @@ const Avatar = ({
   name,
   ring,
   size = 'md',
+  hand = false,
 }: {
   name: string;
   ring: string;
   size?: 'sm' | 'md';
+  hand?: boolean;
 }) => (
-  <span
-    title={name}
-    style={{ backgroundColor: colorForName(name) }}
-    className={`${
-      size === 'sm' ? 'w-7 h-7 text-[11px]' : 'w-8 h-8 text-xs'
-    } rounded-full grid place-items-center font-semibold text-white uppercase ring-2 ${ring}`}
-  >
-    {name[0]}
+  <span className="relative inline-flex">
+    <span
+      title={name}
+      style={{ backgroundColor: colorForName(name) }}
+      className={`${
+        size === 'sm' ? 'w-7 h-7 text-[11px]' : 'w-8 h-8 text-xs'
+      } rounded-full grid place-items-center font-semibold text-white uppercase ring-2 ${ring}`}
+    >
+      {name[0]}
+    </span>
+    {hand && (
+      <span className="absolute -top-1.5 -right-1.5 text-[11px] leading-none drop-shadow">
+        ✋
+      </span>
+    )}
   </span>
 );
+
+const REACTIONS = ['👍', '❤️', '😂', '🎉', '👏'];
 
 const fmt = (s: number) =>
   `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(
@@ -69,6 +82,16 @@ const Room = () => {
   const [elapsed, setElapsed] = useState(0);
   const [theme, setTheme] = useState<Theme>('dark');
   const [videoMode, setVideoMode] = useState<VideoMode>('dock');
+  // Raised hands keyed by peer socket id (mine tracked separately since my own
+  // avatar is keyed 'me', not by socket id).
+  const [raisedHands, setRaisedHands] = useState<Set<string>>(new Set());
+  const [myHandRaised, setMyHandRaised] = useState(false);
+  const [reactionsOpen, setReactionsOpen] = useState(false);
+  // Transient floating emoji reactions.
+  const [floats, setFloats] = useState<
+    { key: number; emoji: string; left: number }[]
+  >([]);
+  const floatKey = useRef(0);
   // Server-authoritative room timer (shared by everyone in the session).
   // `offset` corrects for the difference between this client's clock and
   // the server's, so all participants render the same elapsed time.
@@ -165,6 +188,30 @@ const Room = () => {
   const toggleTimer = () => socket?.emit('timer:toggle');
   const resetTimer = () => socket?.emit('timer:reset');
 
+  const handCount = raisedHands.size + (myHandRaised ? 1 : 0);
+
+  const spawnReaction = (emoji: string) => {
+    const key = ++floatKey.current;
+    const left = 8 + Math.random() * 74;
+    setFloats((f) => [...f, { key, emoji, left }]);
+    setTimeout(
+      () => setFloats((f) => f.filter((x) => x.key !== key)),
+      2300
+    );
+  };
+
+  const sendReaction = (emoji: string) => {
+    socket?.emit('room:reaction', { emoji });
+    spawnReaction(emoji); // show my own instantly (server relays to others)
+    setReactionsOpen(false);
+  };
+
+  const toggleHand = () => {
+    const next = !myHandRaised;
+    setMyHandRaised(next);
+    socket?.emit('room:hand', { raised: next });
+  };
+
   useEffect(() => {
     if (!roomId || !accessToken) return;
 
@@ -177,8 +224,25 @@ const Room = () => {
       setParticipants((prev) =>
         prev.some((x) => x.id === p.id) ? prev : [...prev, p]
       );
-    const onLeft = ({ id }: { id: string }) =>
+    const onLeft = ({ id }: { id: string }) => {
       setParticipants((prev) => prev.filter((x) => x.id !== id));
+      setRaisedHands((prev) => {
+        if (!prev.has(id)) return prev;
+        const n = new Set(prev);
+        n.delete(id);
+        return n;
+      });
+    };
+    const onHands = (list: { id: string }[]) =>
+      setRaisedHands(new Set(list.map((x) => x.id)));
+    const onHand = ({ id, raised }: { id: string; raised: boolean }) =>
+      setRaisedHands((prev) => {
+        const n = new Set(prev);
+        if (raised) n.add(id);
+        else n.delete(id);
+        return n;
+      });
+    const onReaction = ({ emoji }: { emoji: string }) => spawnReaction(emoji);
     const onTimer = (t: {
       startedAt: number;
       accumulated: number;
@@ -196,6 +260,9 @@ const Room = () => {
     s.on('room:peer-joined', onJoined);
     s.on('room:peer-left', onLeft);
     s.on('room:timer', onTimer);
+    s.on('room:hands', onHands);
+    s.on('room:hand', onHand);
+    s.on('room:reaction', onReaction);
 
     setSocket(s);
 
@@ -204,6 +271,9 @@ const Room = () => {
       s.off('room:peer-joined', onJoined);
       s.off('room:peer-left', onLeft);
       s.off('room:timer', onTimer);
+      s.off('room:hands', onHands);
+      s.off('room:hand', onHand);
+      s.off('room:reaction', onReaction);
       s.disconnect();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -292,6 +362,49 @@ const Room = () => {
             )}
           </button>
 
+          {/* Reactions */}
+          <div className="relative">
+            <button
+              onClick={() => setReactionsOpen((v) => !v)}
+              title="Send a reaction"
+              className={`w-8 h-8 rounded-full grid place-items-center transition-colors ${t.toggle}`}
+            >
+              <EmojiHappyIcon className="w-4 h-4" />
+            </button>
+            {reactionsOpen && (
+              <div
+                className={`absolute right-0 top-full mt-2 flex items-center gap-1 border rounded-full px-2 py-1.5 shadow-2xl z-40 ${t.popover}`}
+                onMouseLeave={() => setReactionsOpen(false)}
+              >
+                {REACTIONS.map((e) => (
+                  <button
+                    key={e}
+                    onClick={() => sendReaction(e)}
+                    className="w-8 h-8 rounded-full grid place-items-center text-lg hover:scale-125 transition-transform"
+                  >
+                    {e}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Raise hand */}
+          <button
+            onClick={toggleHand}
+            title={myHandRaised ? 'Lower your hand' : 'Raise your hand'}
+            className={`relative w-8 h-8 rounded-full grid place-items-center transition-colors ${
+              myHandRaised ? 'bg-amber-400/20 text-amber-500' : t.toggle
+            }`}
+          >
+            <HandIcon className="w-4 h-4" />
+            {handCount > 0 && (
+              <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-amber-500 text-white text-[10px] font-bold grid place-items-center">
+                {handCount}
+              </span>
+            )}
+          </button>
+
           {/* Participants */}
           <div className="relative">
             <button
@@ -300,7 +413,12 @@ const Room = () => {
             >
               <div className="flex -space-x-2">
                 {everyone.slice(0, 4).map((p) => (
-                  <Avatar key={p.id} name={p.name} ring={t.avatarRing} />
+                  <Avatar
+                    key={p.id}
+                    name={p.name}
+                    ring={t.avatarRing}
+                    hand={p.id === 'me' ? myHandRaised : raisedHands.has(p.id)}
+                  />
                 ))}
               </div>
               <span className={`text-xs ${t.count}`}>{everyone.length}</span>
@@ -323,7 +441,14 @@ const Room = () => {
                       key={p.id}
                       className={`flex items-center gap-3 px-4 py-2 ${t.hover}`}
                     >
-                      <Avatar name={p.name} ring="ring-transparent" size="sm" />
+                      <Avatar
+                        name={p.name}
+                        ring="ring-transparent"
+                        size="sm"
+                        hand={
+                          p.id === 'me' ? myHandRaised : raisedHands.has(p.id)
+                        }
+                      />
                       <p className="text-sm truncate">
                         {p.name}
                         {p.id === 'me' && (
@@ -467,6 +592,23 @@ const Room = () => {
             </p>
           )}
         </DraggableVideoDock>
+      </div>
+
+      {/* Floating emoji reactions (transient, non-interactive) */}
+      <div className="pointer-events-none fixed inset-0 z-[60] overflow-hidden">
+        <style>{`@keyframes verse-float{0%{transform:translateY(0) scale(.5);opacity:0}12%{opacity:1;transform:translateY(-14px) scale(1)}100%{transform:translateY(-42vh) scale(1.15);opacity:0}}`}</style>
+        {floats.map((f) => (
+          <span
+            key={f.key}
+            style={{
+              left: `${f.left}%`,
+              animation: 'verse-float 2.2s ease-out forwards',
+            }}
+            className="absolute bottom-24 text-4xl select-none"
+          >
+            {f.emoji}
+          </span>
+        ))}
       </div>
     </div>
   );
